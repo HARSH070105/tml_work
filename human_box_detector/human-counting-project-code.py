@@ -1,111 +1,144 @@
 import cv2
-# import imutils
 import numpy as np
-import argparse
+import serial
+import time
 
-def detect(frame):
-    bounding_box_cordinates, weights =  HOGCV.detectMultiScale(frame, winStride=(4, 4), padding=(8, 8), scale=1.03)
+rois = []
+drawing = False
+ref_point = []
 
-    person = 1
-    for x, y, w, h in bounding_box_cordinates:
-        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-        cv2.putText(frame, f'Person {person}', (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-        person += 1
+# --- Detection Parameters ---
+DETECTION_PARAMS = {
+    "winStride": (5, 4),
+    "padding": (16, 16),
+    "scale": 1.05,
+    "hitThreshold": -0.2,
+}
 
-    cv2.putText(frame, 'Status : Detecting', (40, 40), cv2.FONT_HERSHEY_DUPLEX, 0.8, (255, 0, 0), 2)
-    cv2.putText(frame, f'Total Persons : {person - 1}', (40, 70), cv2.FONT_HERSHEY_DUPLEX, 0.8, (255, 0, 0), 2)
-    cv2.imshow('output', frame)
+def draw_roi(event, x, y, flags, param):
+    global ref_point, drawing, rois, frame
 
-    return frame
+    if event == cv2.EVENT_LBUTTONDOWN:
+        ref_point = [(x, y)]
+        drawing = True
 
-def detectByPathVideo(path, writer):
-    video = cv2.VideoCapture(path)
-    check, frame = video.read()
-    if not check:
-        print('Video Not Found. Please enter a valid path.')
+    elif event == cv2.EVENT_MOUSEMOVE and drawing:
+        frame_copy = frame.copy()
+        cv2.rectangle(frame_copy, ref_point[0], (x, y), (0, 255, 0), 2)
+        cv2.imshow("Human Detector - ROI Selection", frame_copy)
+
+    elif event == cv2.EVENT_LBUTTONUP:
+        ref_point.append((x, y))
+        drawing = False
+        x1, y1 = ref_point[0]
+        x2, y2 = ref_point[1]
+        rois.append((min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)))
+        print(f"ROI added: {rois[-1]}")
+
+def main():
+    global frame
+
+    # --- Serial Port Setup ---
+    try:
+        ser = serial.Serial('COM3', 115200, timeout=1)
+        time.sleep(2)  # Allow time for Arduino or device to initialize
+        print("Serial connection established on COM3.")
+    except Exception as e:
+        print(f"Warning: Could not open serial port. {e}")
+        ser = None
+
+    # --- HOG Detector Setup ---
+    hog = cv2.HOGDescriptor()
+    hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
+
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        print("Error: Could not open camera.")
         return
 
-    print('Detecting people...')
-    while video.isOpened():
-        check, frame = video.read()
-        if check:
-            frame = imutils.resize(frame, width=min(800, frame.shape[1]))
-            frame = detect(frame)
+    window_name = "Human Detector - ROI Selection"
+    cv2.namedWindow(window_name)
+    cv2.setMouseCallback(window_name, draw_roi)
 
-            if writer is not None:
-                writer.write(frame)
+    detection_mode = False
 
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-        else:
-            break
-
-    video.release()
-    cv2.destroyAllWindows()
-
-def detectByCamera(writer):
-    video = cv2.VideoCapture(0)
-    video.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-    video.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-    print('Detecting people...')
+    print("--- ROI Selection Mode ---")
+    print("Press 'd' to start drawing a new box.")
+    print("Press 'c' to clear all boxes.")
+    print("Press 's' to save ROIs and start detection.")
+    print("Press 'q' to quit.")
 
     while True:
-        check, frame = video.read()
-        if not check:
+        ret, frame = cap.read()
+        if not ret:
+            print("Error: Failed to capture frame.")
             break
 
-        frame = detect(frame)
-        if writer is not None:
-            writer.write(frame)
+        frame = cv2.flip(frame, 1)
+        key = cv2.waitKey(1) & 0xFF
 
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+        if key == ord('q'):
             break
+        elif key == ord('s') and not detection_mode:
+            if not rois:
+                print("Warning: No ROIs defined. Press 'd' to draw at least one.")
+            else:
+                detection_mode = True
+                print("\n--- Detection Mode Started ---")
+                cv2.destroyWindow(window_name)
+                window_name = "Human Detector - Running"
+                cv2.namedWindow(window_name)
+        elif key == ord('c'):
+            rois.clear()
+            print("All ROIs cleared.")
+        elif key == ord('d'):
+            print("Ready to draw. Click and drag your mouse on the window.")
 
-    video.release()
+        if not detection_mode:
+            display_frame = frame.copy()
+            cv2.putText(display_frame, "Mode: ROI Selection", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            cv2.putText(display_frame, "d: Draw | c: Clear | s: Start | q: Quit", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            for (x1, y1, x2, y2) in rois:
+                cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            cv2.imshow(window_name, display_frame)
+
+        else:
+            display_frame = frame.copy()
+            cv2.putText(display_frame, "Mode: Detection | q: Quit", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            status_report = []
+
+            for i, (x1, y1, x2, y2) in enumerate(rois):
+                roi_frame = frame[y1:y2, x1:x2]
+                if roi_frame.size == 0:
+                    continue
+
+                detections, _ = hog.detectMultiScale(roi_frame, **DETECTION_PARAMS)
+                roi_has_human = len(detections) > 0
+                roi_color = (0, 255, 0) if roi_has_human else (0, 0, 255)
+
+                status_report.append(f"ROI #{i+1}: {'DETECTED' if roi_has_human else 'Clear'}")
+
+                cv2.rectangle(display_frame, (x1, y1), (x2, y2), roi_color, 2)
+                cv2.putText(display_frame, f"ROI {i+1}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, roi_color, 2)
+
+                for (x, y, w, h) in detections:
+                    abs_x, abs_y = x + x1, y + y1
+                    cv2.rectangle(display_frame, (abs_x, abs_y), (abs_x + w, abs_y + h), (255, 0, 0), 2)
+
+                # --- Serial Output on Detection ---
+                if roi_has_human and ser:
+                    message = f"DETECTED in Frame {i+1}\n"
+                    ser.write(message.encode('utf-8'))
+
+            print(' | '.join(status_report), end='\r')
+            cv2.imshow(window_name, display_frame)
+
+    cap.release()
+    if ser:
+        ser.close()
+        print("\nSerial connection closed.")
     cv2.destroyAllWindows()
+    print("\nApplication closed.")
 
-def detectByPathImage(path, output_path):
-    image = cv2.imread(path)
-    image = imutils.resize(image, width=min(800, image.shape[1]))
-    result_image = detect(image)
-
-    if output_path is not None:
-        cv2.imwrite(output_path, result_image)
-
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
-
-def humanDetector(args):
-    image_path = args["image"]
-    video_path = args['video']
-    camera = str(args["camera"]).lower() == 'true'
-
-    writer = None
-    if args['output'] is not None and image_path is None:
-        writer = cv2.VideoWriter(args['output'], cv2.VideoWriter_fourcc(*'MJPG'), 10, (600, 600))
-
-    if camera:
-        print('[INFO] Opening Web Cam.')
-        detectByCamera(writer)
-    elif video_path is not None:
-        print('[INFO] Opening Video from path.')
-        detectByPathVideo(video_path, writer)
-    elif image_path is not None:
-        print('[INFO] Opening Image from path.')
-        detectByPathImage(image_path, args['output'])
-
-def argsParser():
-    arg_parse = argparse.ArgumentParser()
-    arg_parse.add_argument("-v", "--video", default=None, help="Path to video file")
-    arg_parse.add_argument("-i", "--image", default=None, help="Path to image file")
-    arg_parse.add_argument("-c", "--camera", default=False, help="Set true to use webcam")
-    arg_parse.add_argument("-o", "--output", type=str, help="Path to output video file")
-    args = vars(arg_parse.parse_args())
-    return args
-
-if __name__ == "__main__":
-    HOGCV = cv2.HOGDescriptor()
-    HOGCV.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
-
-    args = argsParser()
-    humanDetector(args)
+if __name__ == '__main__':
+    main()
