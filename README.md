@@ -61,7 +61,8 @@ Refer to the [Documentation and Spec Sheets](./Documentation%20and%20Spec%20Shee
 ## 🧑‍💻 Developer
 
 **Harsh Kapoor**  
-Intern at ERC Lab, Batch 6  
+Intern at ERC,
+TATA MOTORS
 July 2025
 
 For further details, refer to the [Intern Report - Harsh Kapoor.pdf](./Intern%20Report%20-%20Harsh%20Kapoor.pdf)
